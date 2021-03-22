@@ -1,0 +1,708 @@
+---
+title: "Higgs Boson identification"
+author: "Arturo Prieto Tirado"
+date: "7/12/2020"
+output: html_document
+text-align: justify
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(MASS)
+library(caret)
+library(VGAM)
+library(e1071) 
+library(gridExtra)
+library(tictoc)
+library(doParallel)
+library(mice)
+```
+
+## Introduction
+
+
+
+The way one checks if particle physics theories adjust to reality is by doing collision experiments in accelerators. For example, if we make two protons collide, very different kinds of particles will come out. The theory gives us the probability that a certain event (particle production) will happen, so that we know the distribution we should expect. What one does then is to compare the experiment's results with the current known theory distribution (this is called the "background"), which will be our null hypothesis, with the number of events one would expect to happen if the alternative theory was true. These new events are called "signal", and thus we will expect to see in the experiment signal+background. However, in the real experiment, we don't know the origin of the particle, but we do measure other magnitudes related to its dynamics. So, it would be very useful to have a model that can identify one of these events from real data. In order to do this, we are going to use data from simulations. These events have been created from theory simulations (so that we know if they belong to signal or background) and then simulated the kinematic variables one would measure in the accelerator. The model we will get here is specific for the Higgs boson production decaying into tau tau. So, the background are processes anything$\rightarrow \tau^+\tau^-$ while the signal is Higgs $\rightarrow \tau^+\tau^-$.
+
+The dataset was taken from http://opendata.cern.ch/record/328 and variables that we are going to use can be summarized in the following groups.
+
+- General magnitudes: These are magnitudes like the mass of the Higgs boson candidate (DER_mass_MMC), the missing transverse energy in the detector, associated to neutrinos we cannot measure, (PRI_met), its angle (PRI_met_phi) and the total transverse energy (PRI_met_sumet) as well as the total momentum (DER_pt_tot, DER_sum_pt). Since the nuclei are extended objects, there are other variables named "centrality" that account for the degree of overlap of the nuclei in the collision. DER_met_phi_centrality and DER_lep_eta_centrality reflect eta and met as function of the centrality.
+
+- Jets: Jets are cascades of particles (hadrons) that originate from strong interaction (QCD). We can find a certain number of jets (PRI_jet_num), with a given total momentum , which is a magnitude similar to the energy, (PRI_jet_all_pt) and product and diferences of pseudorapidities (DER_prodeta_jet_jet,DER_deltaeta_jet_jet). The individual characteristics of the most important jet and the second, leading and subleading jets, respectively, are also taken into account: their momentum (PRI_jet_leading_pt, PRI_jet_subleading_pt), their pseudorapidity, a measure of the angle with respect to the beam axis, (PRI_jet_leading_eta, PRI_jet_subleading_eta) and their angle with respect to the axis perpendicular to the beam (PRI_jet_leading_phi, PRI_jet_subleading_phi).
+
+- Leptons (electron, muon and tau): The other kind of particles apart from the Higgs boson, jets and neutrinos (missing transverse energy) that we measure are leptons, existing electron, muon and tau, with the tau being the key one, as stated before, and the others being just residuals of the disintegration process. Similarly to the jets, we can measure their momentum (DER_pt_h, DER_pt_ratio_lep_tau, PRI_tau_pt, PRI_lep_pt), pseudorapidity (DER_deltar_tau_lep, PRI_tau_eta, PRI_lep_eta), phi angle (PRI_tau_phi, PRI_lep_phi), mass (DER_mass_vis) and transverse mass (DER_mass_transverse_met_lep).
+
+ 
+```{r, eval=FALSE}
+
+#NA preprocessing
+
+#memory.limit(size=50000)
+
+X=read.csv("C:/Users/arpri/OneDrive/Escritorio/libros/master/Segundo Semicuatrimestre/Aprendizaje Estadístico/atlas-higgs-challenge-2014-v2.csv/atlas-higgs-challenge-2014-v2.csv")
+
+#discard event id, weight, kaggleset and kaggle weight
+X <- subset( X, select = -c(EventId, Weight, KaggleSet, KaggleWeight, DER_lep_eta_centrality,DER_prodeta_jet_jet,DER_deltaeta_jet_jet, PRI_jet_leading_eta, PRI_jet_leading_phi, PRI_jet_subleading_eta, PRI_jet_subleading_phi ) )
+
+#, DER_mass_jet_jet, PRI_jet_leading_pt, PRI_jet_subleading_pt
+X$DER_mass_jet_jet[X$DER_mass_jet_jet==-999]=0
+X$PRI_jet_leading_pt[X$PRI_jet_leading_pt==-999]=0
+X$PRI_jet_subleading_pt[X$PRI_jet_subleading_pt==-999]=0
+
+alternativa=X
+
+
+#impute missing values of higgs boson
+
+alternativa[alternativa==-999]=NA
+
+alternativab=subset(alternativa, Label=="b")
+alternativas=subset(alternativa, Label=="s")
+
+
+set.seed(10)
+c3 <- makePSOCKcluster(7)
+registerDoParallel(c3)
+tic()
+X_impb <- mice(alternativab,m=1,method="norm", printFlag =FALSE)
+X_impb <- complete(X_impb)
+toc()
+tic()
+X_imps <- mice(alternativas,m=1,method="norm", printFlag =FALSE)
+X_imps <- complete(X_imps)
+toc()
+stopCluster(c3)
+
+#combine them back
+
+X_imp=rbind(X_impb,X_imps)
+
+#clear memory
+rm(X_impb)
+rm(X_imps)
+rm(alternativab)
+rm(alternativas)
+rm(alternativa)
+
+anyNA(X_imp)#now, no NA and no bias in estimation
+
+#save it into a file so we don't need to repeat it
+```
+
+```{r, eval=FALSE}
+#write.csv(X_imp, "fullparticlesnorm.csv")
+
+write.csv(X_imp, "fullparticlesnorm.csv")
+
+
+```
+
+
+```{r, eval=TRUE}
+#load the dataset with no missing values
+
+X_imp=read.csv("fullparticlesnorm.csv")
+X_imp=X_imp[,-1]#it saves an extra column which is just the number of the observation. DElete it.
+```
+
+
+```{r}
+#PRI_jet_num should be coded as a factor since it's really a discrete number with just 4 values
+
+X_imp$PRI_jet_num=as.factor(X_imp$PRI_jet_num)
+
+#code category as factor
+X_imp$Label=as.factor(X_imp$Label)
+
+```
+
+```{r}
+
+##dividir en training y testing usando caret
+
+# Create the training and test datasets
+set.seed(100)
+# Step 1: Get row numbers for the training data
+#change to 0.7 to speed up the training process (but predicting takes more time)
+trainRowNumbers = createDataPartition(X_imp$Label, p = 0.7, list = FALSE)
+# Step 2: Create the training dataset
+trainData = X_imp[trainRowNumbers, ]
+# Step 3: Create the test dataset
+testData = X_imp[-trainRowNumbers, ]
+
+
+
+rm(trainRowNumbers)
+```
+## Pre-process and analysis of the data set
+
+The data have an important problem, and that is that the jet variables (except the number of jets) are only defined when there are jets. We can think of putting the momentum(energy) variables to 0 when there is no jet, which would make sense. However, the angle, pseudorapidity and the rest don't make much sense, since their whole range is already covered by real cases. Any angle we search for, there is a real jet that can have it, so we cannot assign a number to substitute that NA. On the other hand, these NAs can't be replaced by imputation of missing values since any random value would not make physical sense, as has just been explained. A possible solution would be to take these variables as categorical variables such as "no jet", "low value" or "high value". This was attempted, but it added more noise to the analysis, resulting in worse predictive power. So, best approach and the one going to be presented here is the one getting rid of the jet undefined variables except the jet momenta, that are set to 0 for the NAs.
+
+Also, there were some real missing values in the Higgs boson mass variable that were imputed using the library mice and the "norm" method, which applies linear bayesian regression, valid for numeric variables, as is the case for the Higgs boson candidate mass.
+
+A first visualization of the variables is shown in the following kernel densities for quantitatives and barplot for the label: signal or background. 
+```{r}
+barplot(table(X_imp$Label), xlab="label", ylab="frequency")#this already gives us a % of chance on signal versus background, but we have removed NA that were mostly from the background
+```
+
+```{r, out.width="900px"}
+#par(mfrow=c(3,4))
+#for(names in colnames(X)[1:(length(colnames(X))-1)]){
+  #hist(X[[names]], xlab=names,main="", ylab="frequency")
+#}
+
+plot_list=list()
+plot_list2=list()
+plot_list3=list()
+i=1
+for(names in colnames(X_imp)[1:9]){
+  plot_list[[i]]=X_imp %>% ggplot(aes_string(x = names)) +  geom_density(aes(group = Label, colour = Label, fill = Label), alpha = 0.2)
+  i=i+1
+}
+i=1
+for(names in colnames(X_imp)[10:18]){
+  plot_list2[[i]]=X_imp %>% ggplot(aes_string(x = names)) +  geom_density(aes(group = Label, colour = Label, fill = Label), alpha = 0.2)
+  i=i+1
+}
+i=1
+for(names in colnames(X_imp)[19:23]){
+  plot_list3[[i]]=X_imp %>% ggplot(aes_string(x = names)) +  geom_density(aes(group = Label, colour = Label, fill = Label), alpha = 0.2)
+  i=i+1
+}
+
+grid.arrange(grobs=plot_list,ncol=3)
+grid.arrange(grobs=plot_list2,ncol=3)
+grid.arrange(grobs=plot_list3, ncol=3, nrow=2, heights=c(2,2))
+rm(plot_list)#los borro porque ocupan mucha memoria
+rm(plot_list2)
+rm(plot_list3)
+```
+
+We can see that the background is the majority group, with a sample proportion of 65.8%. Regarding the predictors, none of the variables distinguishes clearly the two groups on its own, although there are some that overlap very little. Furthermore, there are some variables that have a great overlap between the groups, having almost identical distributions. Also, we can see that the energy related variables (met, pt) have really long tails, but I won't take logarithms to not distort their physical meaning. This is completely normal, since it is known theoretically that the frequency of events goes as an inverse power of the energy. This is the reason why even this dataset with almost 1 million observations could be considered small for some research topics.
+
+Another step that can be taken now is to analyze the correlation between all the variables and the label. Since it is a dichotomous categorical variable, we can use the point biserial correlation for its correlation with numerical variables and Cramer's V between categorical ones (number of jets).
+
+```{r}
+
+# Which are the most correlated variables with label?
+library(ltm)
+library(rcompanion)#cramer v for jet num
+y = as.factor(X_imp$Label)
+corr_label=matrix(nrow=length(X_imp),ncol=length(X_imp))
+rownames(corr_label)=colnames(X_imp)
+colnames(corr_label)=colnames(X_imp)
+for(i in(1:(length(X_imp)-1))){
+  if(colnames(X_imp)[i]=="PRI_jet_num"){
+    corr_label["Label", colnames(X_imp)[i]]=abs(cramerV(X_imp[,i],y))
+    
+  }else{
+    #print(i)
+    corr_label["Label", colnames(X_imp)[i]]=abs(biserial.cor(X_imp[,i],y))#take absolute value
+  }
+}
+corr_label["Label", "Label"]=1#add manually the correlation with its own
+
+corr_label <- sort(corr_label["Label",], decreasing = T)
+corr=data.frame(corr_label)
+ggplot(corr,aes(x = row.names(corr), y = corr_label)) + 
+  geom_bar(stat = "identity", fill = "lightblue") + 
+  scale_x_discrete(limits= row.names(corr)) +
+  labs(x = "", y = "Label", title = "Correlations") + 
+  theme(plot.title = element_text(hjust = 0, size = rel(1.5)),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+## Modelling using Statistical Tools
+
+
+The first goal is to create a model that explains what is happening. That is, the main contributors to being in signal or background. Afterwards, we will create a model that focuses on prediction, but now our goal is simplicity and explainability.
+
+
+Since this is binary classification, we can try with logistic regression. To focus on interpretation, we could try the model with the most correlated variable or any number of them, we will do it with 4. However, one should keep in mind that the correlation only tells linear relations, not more complex ones.
+
+
+```{r}
+# Logistic regression:
+
+#logistic model with first n correlated variables
+
+n=4#first 4 variables
+
+variables=names(corr_label)[2:(2+(n-1))] #because 1 is label
+
+fmla <- as.formula(paste("Label ~ ", paste(variables, collapse= "+")))
+
+log.fit2 = vglm(fmla, family=multinomial(refLevel=1), data=trainData)#la referencia es background
+
+summary(log.fit2)
+
+#save(log.fit2, file="logfit2.Rdata")
+```
+
+We can see that the variables are all very significative. Their interpretation is that, for every one unit change in each of the variables, the log odds of being a signal event versus a background event (the reference one) increases or decreases by the coefficient.
+
+
+We can take the exponential of the coefficients to get the odds.
+```{r}
+
+#intervalo de confianza de los parametros
+#confint(log.fit2)
+
+# Odd ratios
+
+exp(coef(log.fit2))
+
+```
+We know that these variables are the most correlated with the group label, but that doesn't tell us the numerical effect. We can see in the odds ratios that the expected change in the odds of being signal (vs being background) per unit change vary very little. It is important to note that these changes are unit dependent in the sense that the variables have a wide range, being of hundreds or thousands, thus it makes sense that the unitary change is smaller. We can see in the mass_jet_jet kernel densities that the distributions for signal and background groups are different and the units on the scale are of order $10^4$ in the units used, so, a significant difference between both groups  will mean in practice a high increase in the odds for being signal, which makes sense since the right hand side tail of the signal distribution goes far beyond than the background one, so it is clear that if we see an event with really high mass_jet_jet, we would associate it to being signal. 
+
+The same can be seen in the other variables, phi centrality and tau pt, the signal distribution spans higher values than the background so, if we had an unknown high value, we would associate it with signal intuitively. The logit model tells us the same, because the odds of these two variables are greater than one In the same way, lower values of transverse missing transverse energy are associated with signal, in agreement with the plot as well.
+
+
+In conclusion, the logit model seems more or less consistent and gives a nice and simple interpretation of the main variables entering into play to describe the physics phenomena behind the data, consistent with the shape of the distributions observed when pre analyzing the data. A possible interpretation is that the kind of interaction plays the most important role. The missing transverse energy (mass_transverse_met) accounts for an excedent in energy, usually associated to neutrinos, related with weak force interaction. The mass_jet_jet is related to the energy of jets, which are cascades of particles produced by strong force interaction (QCD). Following this way of reasoning, it makes sense that the distance of interaction given by the centrality would also be different for each interaction type. Therefore, one of the main drivers for classification is the type of interaction. The other main driver is the $\tau$ momentum, where the model tells us there is a key difference between the taus produced by a Higgs and the ones produced by background processes.
+
+
+
+```{r}
+# predicting the complete set (measure of R^2)
+prob.test = predict(log.fit2, newdata=testData, type="response")
+#head(prob.test)
+
+# output are probabilities, not labels
+
+
+pred.test <- as.factor(levels(y)[max.col(prob.test)])
+#head(pred.test)
+
+# summarize accuracy (confusion matrix) for a given probability rule 
+# predictions in rows, true values in columns (but we can change the order)
+ConfMat = table(pred.test,testData$Label)
+#ConfMat
+
+CM=ConfMat
+
+n = length(testData$Label)
+prop.errors <- (n - sum(diag(ConfMat))) / n
+#prop.errors
+
+accuracysimplemodel <- sum(diag(ConfMat)) / n
+#accuracysimplemodel
+
+sensitivity=CM[1,1]/(CM[1,1]+CM[2,1])
+
+#sensitivity
+
+specificity=CM[2,2]/(CM[1,2]+CM[2,2])
+
+#specificity
+
+```
+
+This model gets an accuracy of 71.6%, how good is it? A good first comparison is looking at the sample proportion, which is 65.8% of background processes. That means that if we classified always as background, without thinking, we will be right 65.8% of the time. The accuracy of this little but explainable model is 71.6%, which is better but not an enormous increase.
+
+```{r}
+nbackground=sum(X_imp$Label=="b")
+
+supernaiveaccuracy=nbackground/nrow(X_imp)
+
+```
+
+
+One thing to take into account is that having enough "s" events supports a claim for discovery, therefore, it is not an error we should tolerate because we want to be really sure that the "new physics" events are real. One doesn't want to claim that has discovered a new particle to then see it was all a fake. On the other hand, classifying "b" as "s" might make a real discovery need more work, but we can take it as a conservative approach. Then, we should try with change of threshold. This value could be tuned as a hyperparameter if we knew the exact cost matrix. However, that we don't know.
+
+When talking about these kind of errors, it is useful to do so in terms of two parameters called "specificity" and "sensitivity, defined as follows: 
+$$
+\begin{equation}
+Specificity=\frac{\text{real s classified as s}}{\text{real s classified as s}+ \text{real s predicted as b}}
+\end{equation}
+$$
+
+$$
+\begin{equation}
+Sensitivity= \frac{\text{real b classified as b}} {\text{real b classified as b +real b classified as s}}
+\end{equation}
+$$
+So, we would like to minimize real b classified as s higher, which means we would prioritize higher sensitivity as possible (even better than specificity, but high values of both would be ideal). This way we traded a little bit of accuracy and gained that real "b" classified as "s" are more penalized. 
+
+
+```{r, eval=FALSE}
+threshold=0.57
+
+
+
+prediction=rep("b", nrow(testData))
+
+prediction[which(prob.test[,2] > threshold)] = "s"
+prediction = as.factor(prediction)
+
+#head(prediction)
+
+# summarize accuracy (confusion matrix) for a given probability rule 
+# predictions in rows, true values in columns (but we can change the order)
+ConfMat = table(prediction,testData$Label)
+ConfMat
+
+CM=ConfMat
+
+
+n = length(testData$Label)
+prop.errors <- (n - sum(diag(ConfMat))) / n
+#prop.errors
+
+accuracysimplemodel2 <- sum(diag(ConfMat)) / n
+accuracysimplemodel2
+
+sensitivity=CM[1,1]/(CM[1,1]+CM[2,1])
+
+sensitivity
+
+specificity=CM[2,2]/(CM[1,2]+CM[2,2])
+
+specificity
+
+```
+
+
+Now, we should aim to develop a model that focuses on prediction, not on explainability and see if we can get higher than these values we just got. So, we will in general use all the variables together with the training set to then see the results on the testing set but we can also try to use less variables to avoid overfitting.
+
+The first model is complete logistic regression (with all the variables). The accuracy increases up to 74.5%, not that much. This means that the problem is in general very noisy, since not even with a very complex model can we improve a lot. Since there are many variables and many are not significant, the next model to try can be penalized logistic regression so that we can see the most important ones, including non-linear effects.
+
+```{r, eval=FALSE}
+log.fitcomplete = vglm(Label ~., family=multinomial(refLevel=1), data=trainData)
+#summary(log.fitcomplete)
+
+prob.testcomplete = predict(log.fitcomplete, newdata=testData, type="response")
+#head(prob.testcomplete)
+```
+
+
+
+
+```{r, eval=FALSE}
+threshold=0.53 
+
+prediction=rep("b", nrow(testData))
+
+prediction[which(prob.testcomplete[,2] > threshold)] = "s"
+prediction = as.factor(prediction)
+
+#head(prediction)
+
+# summarize accuracy (confusion matrix) for a given probability rule 
+# predictions in rows, true values in columns (but we can change the order)
+ConfMat = table(prediction,testData$Label)
+ConfMat
+
+CM=ConfMat
+
+n = length(testData$Label)
+prop.errors <- (n - sum(diag(ConfMat))) / n
+#prop.errors
+
+accuracycompletelogistic <- sum(diag(ConfMat)) / n
+accuracycompletelogistic
+
+sensitivity=CM[1,1]/(CM[1,1]+CM[2,1])
+
+sensitivity
+
+specificity=CM[2,2]/(CM[1,2]+CM[2,2])
+
+specificity
+
+```
+
+
+```{r, eval=FALSE}
+#Tarda 8 horas
+
+
+# Each model can be automatically tuned and evaluated 
+# In this case, we are goint to use 5 repeats of 10-fold cross validation
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 5,
+                     number = 10)
+tic()
+c6=makePSOCKcluster(6)
+registerDoParallel(c6)
+# We have many predictors, hence use penalized logistic regression 
+lrFit <- train(Label ~ ., 
+                method = "glmnet",
+                family = "multinomial",
+                data = trainData,
+                preProcess = c("center", "scale"),
+                tuneGrid = expand.grid(alpha = seq(0, 2, 0.1), lambda = seq(0, .1, 0.01)),
+                metric = "Accuracy",
+                trControl = ctrl)
+stopCluster(c6)
+toc()
+#print(lrFit)
+lrPred = predict(lrFit, testData)
+confusionMatrix(lrPred, testData$Label)
+lr_imp <- varImp(lrFit, scale = F)
+plot(lr_imp, scales = list(y = list(cex = .95)))
+
+
+#save it for later so that we don't need it to run again
+
+
+save(lrFit, file="lrfit.Rdata")
+
+
+```
+
+
+```{r}
+load("lrfit.Rdata")
+lrPred = predict(lrFit, testData)
+
+#confusionMatrix(lrPred, testData$Label)
+lr_imp <- varImp(lrFit, scale = F)
+plot(lr_imp, scales = list(y = list(cex = .95)))
+```
+
+We can see that the interpretation of the variables has changed, being the mass of the Higgs boson candidate the strongest indicator, followed by lepton kinematics and then the previously analyzed variables. It makes sense that the Higss boson candidate mass is very influencial, since if it leads to an "unrealistic" mass, it's probably not a true Higgs boson event ("s"). However, this effect is clearly non-linear, since it was not seen on the correlation. The leptonic variables support the hypothesis that the type of interaction is the main driver, since leptons are also associated with weak (the same as the neutrino variable found important before) and electromagnetic force.
+
+
+Finally, we can try using Bayes classifiers: Naive Bayes, QDA, LDA (and their step versions). The complete results are summarized in the following table.
+
+
+
+```{r, eval=FALSE}
+
+# Naive Bayes (Gaussian and linear)
+
+
+naive.model <- naiveBayes(Label ~ ., data=trainData, prior = c(0.66, 0.34))
+
+#naive.model
+prediction = predict(naive.model, newdata=testData)
+CM=confusionMatrix(prediction, testData$Label)
+
+CM
+
+```
+
+
+```{r, eval=FALSE}
+# Quadratic Discriminant Analysis (QDA)
+qda.model <- qda(Label ~ ., data=trainData, prior = c(0.65, 0.35))
+#qda.model
+prediction = predict(qda.model, newdata=testData)$class
+confusionMatrix(prediction, testData$Label)
+
+```
+
+```{r, eval=FALSE}
+
+# LDA
+lda.model <- lda(Label ~ ., data=trainData, prior = c(0.65, 0.35))
+
+probability = predict(lda.model, newdata=testData)$posterior
+#head(probability)
+
+prediction <- max.col(probability)
+#head(prediction)
+# It's equivalent to
+prediction = predict(lda.model, newdata=testData)$class
+#head(prediction)
+
+# Performance: confusion matrix
+confusionMatrix(prediction, testData$Label)
+
+```
+
+
+```{r}
+# Create the training and test datasets
+set.seed(100)
+# Step 1: Get row numbers for the training data
+#change to speed up the training process 
+trainRowNumbers = createDataPartition(X_imp$Label, p = 0.05, list = FALSE)
+# Step 2: Create the training dataset
+trainData = X_imp[trainRowNumbers, ]
+# Step 3: Create the test dataset
+testData = X_imp[-trainRowNumbers, ]
+
+rm(trainRowNumbers)
+
+
+```
+
+```{r, eval=FALSE}
+# These are the models for regression and classification:
+#names(getModelInfo()) 
+threshold=0.51
+
+
+c6=makePSOCKcluster(6)
+registerDoParallel(c6)
+ldaFit <- train(Label ~ ., 
+                method = "stepLDA", 
+                data = trainData,
+                preProcess = c("center", "scale"),
+                metric = "Accuracy")
+stopCluster(c6)
+save(ldaFit, file="stepldafit.Rdata")
+```
+
+```{r, eval=FALSE}
+load("stepldafit.Rdata")
+ldaPred = predict(ldaFit, testData)
+threshold=0.5
+lrProb = predict(ldaFit, newdata=testData, type="prob")
+lrPred = rep("b", nrow(testData))
+lrPred[which(lrProb[,2] > threshold)] = "s"
+CM = confusionMatrix(as.factor(lrPred), testData$Label)
+
+#CM
+
+
+
+```
+
+```{r, eval=FALSE}
+
+ctrl <- trainControl(method = "repeatedcv", 
+                     repeats = 5,
+                     number = 10)
+
+c6=makePSOCKcluster(6)
+registerDoParallel(c6)
+qdaFit <- train(Label ~ ., 
+                method = "stepQDA", 
+                data = trainData,
+                preProcess = c("center", "scale"),
+                metric = "Accuracy",
+                trControl = ctrl)
+stopCluster(c6)
+save(qdaFit, file="stepqdafit.Rdata")
+```
+
+```{r, eval=FALSE}
+load("stepqdafit.Rdata")
+qdaPred = predict(qdaFit, testData)
+
+lrProb = predict(qdaFit, newdata=testData, type="prob")
+lrPred = rep("b", nrow(testData))
+threshold=0.51#change threshold
+lrPred[which(lrProb[,2] > threshold)] = "s"
+CM = confusionMatrix(as.factor(lrPred), testData$Label)
+
+CM
+
+sensitivity=CM$table[1,1]/(CM$table[1,1]+CM$table[2,1])
+
+sensitivity
+
+specificity=CM$table[2,2]/(CM$table[1,2]+CM$table[2,2])
+
+specificity
+
+
+
+```
+
+
+
+| Model            |   Accuracy    |  Specificity | Sensitivity |
+|:----------------:|:-------------:|:------------:|:-----------:|
+| "b" model        |  65.8%        |      0 %     |     100%    |
+| Simple Logistic  |    70.8%      |      29.9%   |     92.1%   |
+|Logistic complete |    74.7%      |     48.2%    |   88.5%     |
+|Penalized Logistic|       75.0%   |    53%       |    86.4%    |
+| Naive Bayes      |       71.9%   |      52.7%   |     81.9%   |
+| LDA              |       74.6%   |      52.3%   |      86.1%  |
+| QDA              |      75.7%    |     63.9%    |     81.9%   |
+| Step LDA         |       69.3%   |      39.8%   |  84.6%      | 
+| Step QDA         |       72.1%   |    61.8%     |  77.5%      |
+
+
+
+
+## Discussion and Conclusions
+
+
+In conclusion, the best models are QDA and penalized logistic regression, with 75.6% and 75% of accuracy and 81.9% and 86.4% of sensitivity. The stepwise version of QDA got worst results probably because the training set was reduced in size due to computational time issues, otherwise it will be a good candidate. It would also be interesting to do an ensemble of these two models together or with more of them if having enough time to run the available statistical models in caret and choose the best. However, comparing it to the sample proportion of "b", we can see that the problem is very noisy in general and it might be difficult to improve much further. 
+
+
+In terms of interpretation, a simple one has been obtained through a simple logistic regression model with the 4 most correlated variables, determining that the key drivers where the type of interaction as well as the tau energy. Furthermore, looking at variable importance, it was shown that the Higgs boson candidate mass has the greatest importance of all, but being a non-linear effect.
+
+
+
+On the other hand, there might be room for improvement in the NA treatment, since in the end, a lot of variables (the jet variables) were discarded and it would be useful to be able to use that information. One way would be creating categorical variables. Since the variable number of jets already exists and we want one of the categories to be "no jet" to avoid these NAs, we would need at least 3 categories, otherwise the information would already be contained in having or not a jet. The problem with this would be which threshold to apply to each of the categories "low value" and "high value". As commented before, applying some limits looking at the distribution by eye didn't improve the results and it introduced a bias for sure. However, this could change if using clustering techniques to create k=3 groups in the problematic variables so that we don't need to choose the values arbitrarily. In any case, these would require a more advanced treatment of the data and, due to the size of the dataset, probably too much computational cost.
+
+Finally, there are some Machine Learning methods, like random forests, that are able to deal with NAs, which may lead to better results. This fact will be analyzed in the next part of the project together with other ML methods.
+
+
+
+```{r, eval=FALSE}
+
+
+#this is an appendix with the code to make the categorical version work. its just changing the variable selection
+
+
+#NA preprocessing
+
+
+
+X=read.csv("C:/Users/arpri/OneDrive/Escritorio/libros/master/Segundo Semicuatrimestre/Aprendizaje Estadístico/atlas-higgs-challenge-2014-v2.csv/atlas-higgs-challenge-2014-v2.csv")
+
+#discard event id, weight, kaggleset and kaggle weight
+
+X <- subset( X, select = -c(EventId, Weight, KaggleSet, KaggleWeight  ) )
+
+jetkinematics=c("DER_lep_eta_centrality","DER_prodeta_jet_jet","DER_deltaeta_jet_jet", "PRI_jet_leading_eta", "PRI_jet_leading_phi", "PRI_jet_subleading_eta", "PRI_jet_subleading_phi")
+
+limits=c(1, 5, 1, 2,2,2,2)# (arbitrary) limits as absolute value
+
+
+#create categorical variables regarding "No jet", "low value", "high value" of the problematic variables 
+
+f=function(m,d){
+  if(m==-999) i=0
+  else if(abs(m)>d) i=2
+  else i=1
+}
+
+
+j=1
+for(var in jetkinematics){
+  X[[var]]=factor(
+  mapply(f,X[[var]],limits[j]),
+  levels=0:2,
+  labels=c("No jet","Low Value","High Value")
+)
+  
+j=j+1
+}
+
+
+
+
+
+
+
+#now, need to change the jets mass and pt to 0 when non existent
+
+X$DER_mass_jet_jet[X$DER_mass_jet_jet==-999]=0
+X$PRI_jet_leading_pt[X$PRI_jet_leading_pt==-999]=0
+X$PRI_jet_subleading_pt[X$PRI_jet_subleading_pt==-999]=0
+
+X[X==-999]=NA
+
+anyNA(X)
+
+#higgs boson mass is NA, these are real NAs. impute those missing values
+
+#use now the same code as above
+
+
+```
+
