@@ -1,0 +1,507 @@
+---
+title: "Higgs boson identification with Machine Learning tools"
+author: "Arturo Prieto Tirado"
+date: "22/01/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(MASS)
+library(caret)
+library(VGAM)
+library(e1071) 
+library(gridExtra)
+library(tictoc)
+library(doParallel)
+library(mice)
+library(corrplot)
+library(caretEnsemble)
+library(pROC)
+
+
+a=memory.limit(60000)
+```
+
+
+## Introduction
+
+The goal of this project, as described in the first part, is to find the best models for classification of labels: Higgs boson events (called as "signal") versus any other event that also produces two tau leptons ("background"). The first part of this project consisted in using statistical models for explanation and the best model found was QDA with 75.7% accuracy while we will now focus on Machine Learning models and try to improve the prediction benchmark. This is a very important task, because if the number of signal events we get is high and accurate enough, it would mean that new physics phenomena have been discovered, in our case, the Higgs Boson production but the methods applied here could be applied analogously to any other future research. 
+
+The dataset was taken from http://opendata.cern.ch/record/328 and the variables (a total of 31) contained in the dataset can be summarized in the following groups.
+
+- General magnitudes: These are magnitudes like the mass of the Higgs boson candidate (DER_mass_MMC), the missing transverse energy in the detector, associated to neutrinos we cannot measure, (PRI_met), its angle (PRI_met_phi) and the total transverse energy (PRI_met_sumet) as well as the total momentum (DER_pt_tot, DER_sum_pt). Since the nuclei are extended objects, there are other variables named "centrality" that account for the degree of overlap of the nuclei in the collision. DER_met_phi_centrality and DER_lep_eta_centrality reflect eta and met as function of the centrality.
+
+- Jets: Jets are cascades of particles (hadrons) that originate from strong interaction (QCD). We can find a certain number of jets (PRI_jet_num), with a given total momentum , which is a magnitude similar to the energy, (PRI_jet_all_pt) and product and diferences of pseudorapidities (DER_prodeta_jet_jet,DER_deltaeta_jet_jet). The individual characteristics of the most important jet and the second, leading and subleading jets, respectively, are also taken into account: their momentum (PRI_jet_leading_pt, PRI_jet_subleading_pt), their pseudorapidity, a measure of the angle with respect to the beam axis, (PRI_jet_leading_eta, PRI_jet_subleading_eta) and their angle with respect to the axis perpendicular to the beam (PRI_jet_leading_phi, PRI_jet_subleading_phi).
+
+- Leptons (electron, muon and tau): The other kind of particles apart from the Higgs boson, jets and neutrinos (missing transverse energy) that we measure are leptons, existing electron, muon and tau, with the tau being the key one, as stated before, and the others being just residuals of the disintegration process. Similarly to the jets, we can measure their momentum (DER_pt_h, DER_pt_ratio_lep_tau, PRI_tau_pt, PRI_lep_pt), pseudorapidity (DER_deltar_tau_lep, PRI_tau_eta, PRI_lep_eta), phi angle (PRI_tau_phi, PRI_lep_phi), mass (DER_mass_vis) and transverse mass (DER_mass_transverse_met_lep).
+
+
+However, it was found in part one that the data have NAs since the jet variables are only defined where these jets are produced in the decay process, that doesn't always happen. The best approach and the one we will follow here is to omit these variables (except the jet momenta, that is set to 0 for no jet case) and work with the others since creating categorical variables to describe the jets was found in the statistical part to only add noise to the problem. Also, there were some real missing values in the Higgs boson mass variable that were imputed using the library mice and the "norm" method, which applies linear bayesian regression, valid for numeric variables, as is the case for the Higgs boson candidate mass. This way, the final analysis was done with 818238 observations of 24 variables (including the label).
+
+
+
+## Machine Learning models and ensembles
+
+A first approach was done running several models, but with a smaller training set to reduce the computational cost (it still takes almost one full day). The models used are random forests, linear support vector machines, adaboost, k nearest neighbors and a neural net. Their results are summarized in the following boxplots:
+
+
+
+```{r, eval=TRUE}
+#load the dataset with no missing values
+
+X_imp=read.csv("fullparticlesnorm.csv")
+X_imp=X_imp[,-1]#it saves an extra column which is just the number of the observation. DElete it.
+
+#PRI_jet_num should be coded as a factor since it's really a discrete number with just 4 values
+
+X_imp$PRI_jet_num=as.factor(X_imp$PRI_jet_num)
+
+#code category as factor
+X_imp$Label=as.factor(X_imp$Label)
+
+
+Trainn = createDataPartition(X_imp$Label, p=0.025, list=FALSE)
+training = X_imp[Trainn,]
+testing = X_imp[-Trainn,]
+ctrl = trainControl(classProbs = TRUE, savePredictions = "final")
+
+```
+
+
+
+
+```{r, eval=FALSE}
+#run 5 initial models
+
+Trainn = createDataPartition(X_imp$Label, p=0.05, list=FALSE)
+training = X_imp[Trainn,]
+testing = X_imp[-Trainn,]
+ctrl = trainControl(classProbs = TRUE, savePredictions = "final")
+
+# Run multiple algorithms in one call.
+
+algorithmList = c("rf", "svmLinear", "adaboost", "knn", "nnet") #with p=0.05
+
+#algorithmList=c("xgbTree", "rf", "svmRadial", "adaboost", "nnet")
+set.seed(100)
+#
+memory.limit(size=50000)
+c6=makePSOCKcluster(7)
+registerDoParallel(c6)
+models = caretList(Label ~ ., data = training, preProcess = c("center", "scale"), methodList = algorithmList, trControl=ctrl)
+save(models, file="modelsdef.Rdata")
+results = resamples(models)
+summary(results)
+stack = caretStack(models, method = "glm")
+
+stopCluster(c6)
+
+save(stack, file="ensembledef.Rdata")
+```
+
+
+```{r}
+
+
+load("modelsdef.Rdata")
+results=resamples(models)
+
+
+# Box plots to compare models
+scales = list(x = list(relation = "free"), y = list(relation = "free"))
+bwplot(results, scales = scales)
+
+rm(models)
+
+
+```
+
+
+It can be seen that the performance has improved significantly with these methods with respect to the statistical models. An ensemble of all the models can also be built to improve performance, resulting in an accuracy of 83.2%, not that much of an improvement with respect to its individual best models. However, we need to analyze the correlation between the models. In the ensemble, it is important to take into account that if the predictions for the sub-models were highly corrected (>0.75) then they would be making the same or very similar predictions most of the time reducing the benefit of combining the predictions. Let's analyze the correlation between the individual models composing the ensemble: 
+
+
+
+```{r,eval=FALSE}
+load("ensembledef.Rdata")
+#combined model
+print(stack)
+
+```
+
+
+
+
+```{r}
+# correlation between results
+corrplot(modelCor(results))
+
+```
+
+It can be seen that random forest and adaboost, the two best methods, with more than 80\% accuracy, are highly correlated. We should aim to get better than 80\% accuracy results with some method complementary to (with low correlation) rf or adaboost. The neural net, knn and linear suppor vector machine are low correlated with random forest and adaboost but haven't been able to achieve that performance. A solution could be to find a lot of these medium accuracy models that are low correlated and try to merge all of them, but this would be computationally very expensive due to the size of the problem. Increasing the size of the training set would help as well, but it will also greatly increase the computational issues. Running dozens of algorithms with a greater dataset and then selecting the best and with lowest correlation could be the way to achieve better results just by brute force. A compromise of these solutions is going to be taken in order to improve the ensemble by looking for other algorithms that have higher accuracy and are independent of the ones we already tried. In order to do this, different versions of forests or trees, support vector machines, knn and neural nets will be studied, with results shown in the following boxplot:
+
+
+
+```{r, eval=FALSE}
+#make a giant stack with very low sample size
+#names(getModelInfo()) 
+
+Trainn = createDataPartition(X_imp$Label, p=0.03, list=FALSE)
+training = X_imp[Trainn,]
+testing = X_imp[-Trainn,]
+ctrl = trainControl(classProbs = TRUE, savePredictions = "final")
+
+# Run multiple algorithms in one call.
+
+algorithmList = c("rf", "svmLinear", "svmRadial", "adaboost", "knn", "nnet", "xgbTree", "rotationForest", "pcaNNet", "kknn") #with p=0.03 
+
+#algorithmList=c("xgbTree", "rf", "svmRadial", "adaboost", "nnet")
+set.seed(100)
+
+c6=makePSOCKcluster(7)
+registerDoParallel(c6)
+
+giantmodels = caretList(Label ~ ., data = training, preProcess = c("center", "scale"), methodList = algorithmList, trControl=ctrl)
+
+save(giantmodels, file="giantlist.Rdata")
+
+superstack = caretStack(giantmodels, method = "glm")
+
+stopCluster(c6)
+
+save(superstack, file="giantensemble.Rdata")
+```
+
+
+
+```{r}
+
+load("giantlist.Rdata")
+
+#boxplot of all 10 models 
+
+#load("giantensemble.Rdata")
+results = resamples(giantmodels)
+#summary(results)
+scales = list(x = list(relation = "free"), y = list(relation = "free"))
+bwplot(results, scales = scales)
+```
+
+The models are distributed throughout a range of accuracies from 70% to 84%. New high accuracy models like PCA neural nets or radial support vector machines have been discovered. The following plot shows the correlation between the models to see whether the high accuracy low correlation models objective was achieved.
+
+```{r}
+
+#correlatiom plot
+corrplot(modelCor(results))
+
+#print(superstack)
+
+```
+
+It can be seen that there is low correlation between the best accuracy models except for adaboost, so we can remove it and keep the rest. In particular, a GLM ensemble is made with random forest, radial support vector machines, gradient boosted trees and PCA neural nets.
+
+```{r, eval=FALSE}
+
+noadaboost=giantmodels[c("rf", "svmRadial", "xgbTree", "pcaNNet")]
+
+#finalstack=caretStack(noadaboost, method = "glm")
+
+#print(finalstack)
+
+```
+
+We get an accuracy of 83.4% and kappa 0.62, which is very little improvement with respect to the previous ensemble. Finally, we can try to improve these 4 models with hyperparameter tuning. Hyperparameter tuning could also be applied to the other models not included in the ensemble and lead to better results. However, it was assumed that due to the significant difference in precision, the improvement will probably not be worth the computational time, which would be a lot. The final results with hyperparameter tuning via 10 fold cross validation repeated 3 times are shown in the following boxplot:
+
+
+```{r, eval=FALSE}
+
+#Hyperparameter tuning training
+
+Trainn = createDataPartition(X_imp$Label, p=0.025, list=FALSE)
+training = X_imp[Trainn,]
+testing = X_imp[-Trainn,]
+ctrl = trainControl(method = "repeatedcv", number = 10, repeats = 3,classProbs = TRUE, savePredictions = "final", verboseIter = TRUE )
+
+# Run multiple algorithms in one call.
+
+
+
+
+#grid for tuning xgb
+xgb_grid = expand.grid(
+  nrounds = c(500,1000),
+  eta = c(0.01, 0.001), 
+  max_depth = c(2, 4, 6),
+  gamma = 1,
+  colsample_bytree = c(0.2, 0.4),
+  min_child_weight = c(1,5),
+  subsample = 1
+)
+
+# grid for svm	
+svmgrid=expand.grid(sigma = c(.01, .015, 0.2),
+                    C = c(0.75, 0.9, 1, 1.1, 1.25))
+
+
+#grid for neural network
+
+neuralgrid = expand.grid(size=c(2,4,6), decay=c(0.01,0.001))
+
+set.seed(100)
+
+c6=makePSOCKcluster(7)#7 clusters in parallel
+registerDoParallel(c6)
+
+giantmodelshyperparam = caretList(Label ~ ., data = training,
+                                  preProcess = c("center", "scale"),
+                                  
+                                  tuneList=list(
+    rf=caretModelSpec(method="rf", tuneGrid=data.frame(.mtry=c(6,7,8))),
+    xgbTree=caretModelSpec(method="xgbTree", tuneGrid=xgb_grid),
+    svmRadial=caretModelSpec(method="svmRadial", tuneGrid=svmgrid),
+    pcaNNet=caretModelSpec(method="pcaNNet", tuneGrid=neuralgrid)
+  ),
+                                  trControl=ctrl)
+
+#save(giantmodelshyperparam, file="giantlisthyperparam.Rdata")
+
+superstackhyperparam = caretStack(giantmodelshyperparam, method = "glm")
+
+stopCluster(c6)
+
+#save(superstackhyperparam, file="giantensemblehyperparam.Rdata")
+
+print(superstackhyperparam)
+```
+
+
+
+
+
+
+
+```{r}
+
+Trainn = createDataPartition(X_imp$Label, p=0.025, list=FALSE)
+training = X_imp[Trainn,]
+testing = X_imp[-Trainn,]
+
+load("giantlisthyperparam.Rdata")
+#load("giantensemblehyperparam.Rdata")
+```
+
+```{r}
+#generate boxplot
+results = resamples(giantmodelshyperparam)
+#summary(results)
+scales = list(x = list(relation = "free"), y = list(relation = "free"))
+bwplot(results, scales = scales)
+
+
+#print(superstackhyperparam)
+
+```
+
+
+The models have improved a tiny bit, but the ensemble has just improved from 83.4% to 83.6% accuracy so this means that there might be not so much room left for improvement with these models probably due to noise in the problem. Anyway, we can see in the ROC curve that we get an area under the curve of 0.903, which means that our ensemble model is really good.
+
+```{r}
+
+#generate predictions 
+
+#c6=makePSOCKcluster(7)
+#registerDoParallel(c6)
+#lrProbhyperparam = predict(superstackhyperparam, testing, type="prob")
+#stopCluster(c6)
+
+#save(lrProbhyperparam, file="Predictedprobabilitieshyperparam.Rdata")
+
+load("Predictedprobabilitieshyperparam.Rdata")
+#roc curve
+plot.roc(testing$Label, lrProbhyperparam,col="darkblue", print.auc = TRUE,  auc.polygon=TRUE, grid=c(0.1, 0.2),
+         grid.col=c("green", "red"), max.auc.polygon=TRUE,
+         auc.polygon.col="lightblue", print.thres=TRUE)
+
+```
+
+
+
+
+## Risk Analysis
+
+In terms of costs associated with prediction errors, as explained in the previous part of the project, since we want to be sure when making a discovery, we want the "s" we predict to be as close to reality as possible so that we are certain that we are seeing new physics phenomena. Since the majority of events are background, it is very important that classifying a "b" as an "s" doesn't occur. Therefore, we value sensitivity. So, instead of using the ROC values, that give a compromise between sensitivity and specificity, we will optimize the ensemble for sensitivity. It is difficult to define a cost matrix for this problem, but let's just say that we penalize double more classifying "b" as "s" than "s" as "b".This way, we can iterate on the previously predicted probabilities whose optimal threshold was shown in the ROC curve but favouring sensitivity for specificity. This process could be in general applied penalizing not double but just any factor $p$ with a cost matrix of the form:
+
+
+|                       | Actual background | Actual signal      |
+|:---------------------:|:-----------------:|:------------------:|
+| Predicted background  |  0                |      $p$           |
+| Predicted signal      |    1              |      0             |
+
+
+The unit cost for the particular case of $p=2$ is shown in the following figure:
+
+```{r}
+
+cost.unit <- c(0, 1, 2, 0)#cost matrix
+
+cost.i = matrix(NA, nrow = 2, ncol = 41)
+# 20 replicates for training/testing sets for each of the 10 values of threshold
+
+j <- 0
+for (threshold in seq(0,1,0.025)){
+  #print(threshold)
+  
+  j <- j + 1
+  #cat(j)
+  lrPred = rep("s", nrow(testing))
+  lrPred[which(lrProbhyperparam > threshold)] = "b"
+    
+  CM = confusionMatrix(factor(lrPred), testing$Label)$table
+  cost = sum(as.vector(CM)*cost.unit)/sum(CM)
+  #cost
+    
+  cost.i[1,j] <- cost
+  cost.i[2,j]=threshold
+    
+  
+}
+
+# Threshold optimization:
+plot(cost.i[2,],cost.i[1,], main = "Threshold selection",
+        ylab = "unit cost",
+        xlab = "threshold value",
+        names = seq(0.5,1,0.025),col="royalblue2",las=2)
+
+
+```
+
+
+The optimal point is not very far away from the value suggested by the ROC curve since the penalization (just double) is not very strict. This could be changed depending on the model application. Finally, taking a threshold of 0.7 we get that our ensemble optimized for sensitivity has 82.4% accuracy with 90% sensitivity and 71% specificity with a kappa of 0.62, which are very good results.
+
+
+```{r}
+
+lrPred = rep("s", nrow(testing))
+lrPred[which(lrProbhyperparam > 0.7)] = "b"
+    
+#confusionMatrix(testing$Label,factor(lrPred))
+
+```
+
+
+
+## Variable Importance
+
+
+Let's now analyze variable importance for some of the models that allow it (not all the models in caret allow it) and see if the drivers of what is happening are the same variables that we got for the statistical models. For example, let's look at random forest and gradient boosted trees, two of the best methods and the regular neural net, that we know from the correlation plot has a different way of predicting.
+
+
+```{r}
+par(mfrow=c(1,2))
+plot(varImp(giantmodels[["rf"]]), main="Variable importance of Random Forest")
+plot(varImp(giantmodels[["xgbTree"]]), main="Variable importance of XGBTree")
+```
+
+In the case of the random forest, the main variables are the mass of the higgs boson candidate (DER_mass_MMC), the missing transverse energy of the leptons (DER_mass_transverse_met_lep) and their mass (DER_mass_vis) as well as the tau momentum (PRI_tau_pt) and the centrality of missing transverse energy (DER_met_phi_centrality).
+
+
+In the case of the gradient boosted tree, the main variables are the mass of the higgs boson candidate (DER_mass_MMC), the missing transverse energy of the leptons (DER_mass_transverse_met_lep) and their mass (DER_mass_vis) as well as the tau momentum (PRI_tau_pt) and the mass of the jets (DER_mass_jet_jet). We can see that they are mostly the same as in random forest, which was expected because these models had some correlation between them as we saw before.
+
+```{r}
+plot(varImp(giantmodels[["nnet"]]), main="Variable importance of nnet")
+```
+
+Finally, in the case of the neural network, the missing transverse energy of the leptons (DER_mass_transverse_met_lep) and their mass (DER_mass_vis) as well as momentum variables: total momentum (DER_sum_pt), total jet momentum of all jets (PRI_jet_all_pt) and jet momentum of the leading jet (PRI_jet_leading_pt) are the five main contributors, very different from the ones obtained in the random forest and XGBTree.
+
+
+
+## Discussion and conclusions
+
+
+The following table summarizes the main results out of the whole project both for Statistical models and for Machine Learning Models:
+
+
+| Statistical Model|   Accuracy    |  Specificity | Sensitivity |
+|:----------------:|:-------------:|:------------:|:-----------:|
+| "b" model        |  65.8%        |      0 %     |     100%    |
+| Step LDA         |       69.3%   |      39.8%   |  84.6%      | 
+| Simple Logistic  |    70.8%      |      29.9%   |     92.1%   |
+| Naive Bayes      |       71.9%   |      52.7%   |     81.9%   |
+| Step QDA         |       72.1%   |    61.8%     |  77.5%      |
+| LDA              |       74.6%   |      52.3%   |      86.1%  |
+|Logistic complete |    74.7%      |     48.2%    |   88.5%     |
+|Penalized Logistic|       75.0%   |    53%       |    86.4%    |
+| QDA              |      75.7%    |     63.9%    |     81.9%   |
+
+
+
+
+
+```{r, eval=FALSE}
+
+#evaluate the confusion matrix for each of the models to get their kappa, sens, spec.
+
+nombrestuned=c( "svmRadial", "xgbTree", "pcaNNet")  
+nombres=c( "svmLinear", "adaboost", "knn", "nnet", "rotationForest", "kknn")
+
+for(nombre in nombrestuned){
+  
+  lrprob=predict(giantmodelshyperparam[[nombre]], testing, type="prob")
+  
+  
+  lrPred = rep("b", nrow(testing))
+  lrPred[which(lrprob[,2] > 0.5)] = "s"
+  print(nombre)
+  print(confusionMatrix(factor(lrPred), testing$Label))
+  
+  
+}
+
+for(nombre in nombres){
+  
+  lrprob=predict( giantmodels[[nombre]], testing, type="prob")
+  
+   
+  lrPred = rep("b", nrow(testing))
+  lrPred[which(lrprob[,2] > 0.5)] = "s"
+  print(nombre)
+  print(confusionMatrix(factor(lrPred), testing$Label))
+  
+  
+  
+}
+```
+
+
+| ML Model         |   Accuracy    | Kappa        | Specificity | Sensitivity |
+|:----------------:|:-------------:|:------------:|:-----------:|:-----------:|
+|   Ensemble       |      82.4%    |   0.62       |   71.2  %   |90.0%        |
+| Random forest    |     83.5%     |      0.63    |      71.4%  |    89.8%    |
+|   Adaboost       |       83.4%   |    0.62      |     70.9%   |   89.8%     |
+| XGBTree          |     82.9%     |     0.61     |     71.0%   |     89.1%   |
+| SVMRadial        |        82.1%  |   0.59       |     68.4%   |   89.2%     |
+| PCA Neural Net   |      81.8%    |    0.59      |      68.9%  |   88.4%     |
+|    KNN           |       79.5%   |    0.54      |      67.6%  |      85.6%  |
+|Rotation Forest   |       79.3%   |     0.52     |      58.8%  |   90.0%     |
+|   KKNN           |       77.3%   |    0.49      |    65.5%    |    83.4%    |
+|    SVM Linear    |        75.1%  |     0.41     |      51.7%  |    87.2%    |
+|   Neural Net     |      71.9%    |    0.41      |    69.9%    |   72.9%     |
+
+
+
+
+In conclusion, it can be seen that Machine Learning models outstand statistical models for prediction at the cost of losing interpretability, being the best models Random Forests, XGBTree, PCA Neural Networks and Radial Support Vector Machines with around 82-83% accuracy while the best statistical model was QDA with 75.7% accuracy. However, some interpretability is given in these models in terms of variable importance, where we saw that both Statistical and Machine Learning approaches give compatible results. So, we can conclude that these common variables are effectively the main drivers of the interaction. That is the case of the Higgs boson mass candidate and tau momentum, which makes sense because we are searching for the Higgs to tau tau event in the end, and also some variables related to the type of the interaction: either involving leptons (electromagnetic and weak force) or jets (strong force).
+
+
+Furthermore, it can be seen that the neural network and the gradient boosted trees included jet-related variables, which might open the possibility of improvement including somehow the variables that we discarded for having NAs or simply creating two models, one for non-jet data and another one for jet data specifically. Since some of the variables are the same of logistic regression, this might indicate that there is not a hidden very strong non-linear effect, discouraging the use of deep neural networks which are also even more computationally expensive because, even with PCA neural networks working well, the potential of improvement of neural networks is linked to using enormous quantities of data and hyper parameter tuning.
+
+It is also important to mention the improvement limitations encountered, with no model going beyond 84% accuracy. Even with hyperparameter tuning, the best models seem to have achieved their potential best results given the data, probably due to noise present in the problem. As commented before, a different preprocessing of the jet variables as well as other new variables that extend the original dataset might be a way for the models to reach even better accuracies. Thanks to the knowledge obtained in the variable importance analysis, it seems that adding information about jets or other Higgs boson or tau related magnitudes could yield good results and serve as an starting point to expand the dataset.
+
+Finally, being that said, a GLM ensemble was built with the best four models to achieve maximum predictive power: Random Forest, XGBTree, PCA neural network and Radial Support Vector Machines and optimized for sensitivity, yielding an impressive 82.4% accuracy with 71.2% specificity and 90.0% sensitivity with an Area Under the Curve of 0.903. The most important thing about the models is that they are meant to predict new data and the ensemble has the advantage of generalizing better to these new data by combining the predictions, even if its accuracy is not much better than the one of its components due to the noise. Therefore, it is considered to be the best model for prediction out of all the ones presented.
+
+
+
